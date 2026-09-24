@@ -40,3 +40,27 @@ def test_create_task_completed_optional() -> None:
     assert response.status_code == 201
     created = response.json()
     assert created["completed"] is True
+
+
+def test_get_task_by_id() -> None:
+    """查询已存在的任务应返回 200，且字段与创建结果一致。"""
+    created = client.post(
+        "/api/tasks", json={"title": "看文档", "completed": True}
+    ).json()
+
+    response = client.get(f"/api/tasks/{created['id']}")
+    assert response.status_code == 200
+    assert response.json() == created
+
+
+def test_get_task_not_found() -> None:
+    """查询不存在的任务应返回 404，并给出统一的 detail 信息。"""
+    response = client.get("/api/tasks/999999")
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Task not found"}
+
+
+def test_get_task_invalid_id_type() -> None:
+    """id 不是整数时应由 FastAPI 参数校验拦下，返回 422。"""
+    response = client.get("/api/tasks/abc")
+    assert response.status_code == 422

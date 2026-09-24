@@ -22,11 +22,12 @@ uvicorn app.main:app --reload
 
 ## 接口
 
-| 方法   | 路径           | 请求体                                    | 说明             |
-|--------|----------------|-------------------------------------------|------------------|
-| GET    | `/health`      | 无                                        | 健康检查         |
-| GET    | `/api/tasks`   | 无                                        | 返回任务列表     |
-| POST   | `/api/tasks`   | `{"title": str, "completed"?: bool}`      | 新增任务         |
+| 方法   | 路径                     | 请求体                                | 说明                     |
+|--------|--------------------------|---------------------------------------|--------------------------|
+| GET    | `/health`                | 无                                    | 健康检查                 |
+| GET    | `/api/tasks`             | 无                                    | 返回任务列表             |
+| POST   | `/api/tasks`             | `{"title": str, "completed"?: bool}`  | 新增任务，成功返回 201   |
+| GET    | `/api/tasks/{task_id}`   | 无                                    | 按 id 查询任务，未找到返回 404 |
 
 ### 示例
 
@@ -44,6 +45,15 @@ curl -X POST http://127.0.0.1:8000/api/tasks \
   -H "Content-Type: application/json" \
   -d '{"title": "买牛奶"}'
 # -> {"id": 1, "title": "买牛奶", "completed": false}
+
+# 查询单个任务
+curl http://127.0.0.1:8000/api/tasks/1
+# -> {"id": 1, "title": "买牛奶", "completed": false}
+
+# 查询不存在的任务
+curl -i http://127.0.0.1:8000/api/tasks/999
+# -> HTTP/1.1 404 Not Found
+# -> {"detail": "Task not found"}
 ```
 
 ## 测试
