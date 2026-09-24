@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CODING GitHub 最小验收页</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <p class="eyebrow">CODING AGENT · SMOKE TEST</p>
+        <h1>GitHub 仓库连接验收</h1>
+        <p class="subtitle">用最小 FastAPI 接口验证仓库读取、PR 上下文回流和基础前端交互。</p>
+      </header>
+
+      <section class="card">
+        <div class="field-row">
+          <label>Owner<input id="owner" value="Guo-Yixin" /></label>
+          <label>Repository<input id="repo" value="test-coding-repo" /></label>
+        </div>
+        <div class="actions">
+          <button id="health-button" class="secondary">检查服务</button>
+          <button id="repo-button">读取 GitHub 仓库</button>
+        </div>
+        <p id="status" class="status" aria-live="polite">等待操作</p>
+      </section>
+
+      <section class="card result-card">
+        <div class="result-heading"><h2>接口返回</h2><span id="token-state" class="pill">未检查</span></div>
+        <pre id="result">点击按钮开始验收。</pre>
+      </section>
+    </main>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
