@@ -23,9 +23,18 @@
         <div class="actions">
           <button id="health-button" class="secondary">检查服务</button>
           <button id="repo-button">读取 GitHub 仓库</button>
+          <button id="pulls-button" class="secondary">读取 Pull Request 列表</button>
+          <button id="issues-button" class="secondary">读取 Issue 列表</button>
           <button id="issue-button" class="secondary">读取 Issue</button>
         </div>
         <p id="status" class="status" aria-live="polite">等待操作</p>
+      </section>
+
+      <section class="card">
+        <div class="result-heading"><h2>变更列表</h2><span class="pill">点击条目即读取上下文</span></div>
+        <ul id="list" class="list">
+          <li class="list-empty">点击“读取 Pull Request 列表”或“读取 Issue 列表”后在此选择。</li>
+        </ul>
       </section>
 
       <section class="card result-card">
