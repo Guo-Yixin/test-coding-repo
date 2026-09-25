@@ -1,10 +1,16 @@
 const ownerInput = document.querySelector('#owner')
 const repoInput = document.querySelector('#repo')
+const stateSelect = document.querySelector('#state')
 const issueNumberInput = document.querySelector('#issue-number')
 const statusText = document.querySelector('#status')
 const result = document.querySelector('#result')
 const tokenState = document.querySelector('#token-state')
 const list = document.querySelector('#list')
+const listTitle = document.querySelector('#list-title')
+const pager = document.querySelector('#pager')
+const pagerPage = document.querySelector('#pager-page')
+const pagePrev = document.querySelector('#page-prev')
+const pageNext = document.querySelector('#page-next')
 
 function setStatus(message, kind = '') {
   statusText.textContent = message
@@ -117,26 +123,124 @@ document.querySelector('#repo-button').addEventListener('click', async () => {
   }
 })
 
-async function loadList(endpoint, kind, label) {
-  const owner = ownerInput.value.trim()
-  const repo = repoInput.value.trim()
-  setStatus(`正在请求${label}…`)
+// 每份列表各自持有页码与分页状态，互不干扰。
+// `seq` 是逐请求自增的竞态令牌：响应回来时若与当前值不符，说明这是过期结果，直接丢弃。
+// `loading` 是防重复请求闸门，与 `seq` 职责不同，两者都要保留。
+const listStates = {
+  pulls: { endpoint: '/api/pulls', kind: 'pulls', label: 'Pull Request 列表', page: 1, hasMore: false, nextPage: null, loading: false, seq: 0 },
+  issues: { endpoint: '/api/issues', kind: 'issues', label: 'Issue 列表', page: 1, hasMore: false, nextPage: null, loading: false, seq: 0 },
+}
+let activeKind = null
+
+function currentState() {
+  return activeKind ? listStates[activeKind] : null
+}
+
+function currentQuery() {
+  return {
+    owner: ownerInput.value.trim(),
+    repo: repoInput.value.trim(),
+    state: stateSelect.value,
+  }
+}
+
+// 只在翻到第 2 页起才带上 page，与后端「首屏请求不额外带参数」的约定保持一致。
+function buildListUrl(target, page) {
+  const { owner, repo, state } = currentQuery()
+  const params = [
+    `owner=${encodeURIComponent(owner)}`,
+    `repo=${encodeURIComponent(repo)}`,
+    `state=${encodeURIComponent(state)}`,
+  ]
+  if (page && page > 1) params.push(`page=${encodeURIComponent(page)}`)
+  return `${target.endpoint}?${params.join('&')}`
+}
+
+// 「还有下一页」只读接口返回的 has_more，绝不用 count === per_page 之类的条数推断。
+function renderPager(target) {
+  if (!target) {
+    pager.hidden = true
+    return
+  }
+  pager.hidden = false
+  pagerPage.textContent = target.loading ? `第 ${target.page} 页 · 加载中…` : `第 ${target.page} 页`
+  pagePrev.disabled = target.loading || target.page <= 1
+  pageNext.disabled = target.loading || !target.hasMore
+}
+
+// 切换列表、切换筛选条件或切换仓库时调用：页码归 1 并立刻清空旧结果，避免旧数据混入新查询。
+function resetList(target, message) {
+  target.page = 1
+  target.hasMore = false
+  target.nextPage = null
+  target.loading = false
+  target.seq += 1
+  listTitle.textContent = '尚未读取'
+  showListEmpty(message)
+  renderPager(null)
+}
+
+function resetAllLists() {
+  Object.values(listStates).forEach((target) => resetList(target, '仓库已变更，请重新读取列表。'))
+  activeKind = null
+}
+
+async function loadList(kind, page) {
+  const target = listStates[kind]
+  activeKind = kind
+  listTitle.textContent = `${target.label} · ${currentQuery().state}`
+  const token = ++target.seq
+  target.loading = true
+  renderPager(target)
+  setStatus(`正在请求${target.label}（第 ${page || target.page} 页）…`)
   try {
-    const payload = await requestJson(`${endpoint}?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}&state=open`)
-    const items = payload[kind] || []
-    renderList(kind, items)
+    const payload = await requestJson(buildListUrl(target, page))
+    if (token !== target.seq) return // 过期响应：期间已有更新的请求发出，丢弃本次结果
+    target.page = payload.page || 1
+    target.hasMore = payload.has_more === true
+    target.nextPage = payload.next_page ?? null
+    target.loading = false
+    renderList(kind, payload[kind] || [])
     showResult(payload)
-    setStatus(`${label}共 ${payload.count} 条（state=${payload.state}）`, 'ok')
+    renderPager(target)
+    const scope = target.hasMore ? '还有下一页' : '已到最后一页'
+    setStatus(`${target.label}第 ${target.page} 页共 ${payload.count} 条（state=${payload.state}，${scope}）`, 'ok')
   } catch (error) {
+    if (token !== target.seq) return
+    target.loading = false
     showListEmpty('读取失败。')
     showResult({ error: error.message })
+    renderPager(null)
     setStatus(error.message, 'error')
   }
 }
 
-document.querySelector('#pulls-button').addEventListener('click', () => loadList('/api/pulls', 'pulls', 'Pull Request 列表'))
+pagePrev.addEventListener('click', () => {
+  const target = currentState()
+  if (!target || target.loading || target.page <= 1) return
+  loadList(target.kind, target.page - 1)
+})
 
-document.querySelector('#issues-button').addEventListener('click', () => loadList('/api/issues', 'issues', 'Issue 列表'))
+pageNext.addEventListener('click', () => {
+  const target = currentState()
+  if (!target || target.loading || !target.hasMore) return
+  loadList(target.kind, target.page + 1)
+})
+
+// 切换状态筛选或仓库后，页码归 1 并清空旧列表，防止旧结果混入新查询。
+stateSelect.addEventListener('change', resetAllLists)
+ownerInput.addEventListener('input', resetAllLists)
+repoInput.addEventListener('input', resetAllLists)
+
+document.querySelector('#pulls-button').addEventListener('click', () => {
+  resetList(listStates.pulls, '正在加载…')
+  loadList('pulls', 1)
+})
+
+document.querySelector('#issues-button').addEventListener('click', () => {
+  resetList(listStates.issues, '正在加载…')
+  loadList('issues', 1)
+})
 
 document.querySelector('#issue-button').addEventListener('click', async () => {
   const owner = ownerInput.value.trim()

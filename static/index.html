@@ -18,6 +18,13 @@
         <div class="field-row">
           <label>Owner<input id="owner" value="Guo-Yixin" /></label>
           <label>Repository<input id="repo" value="test-coding-repo" /></label>
+          <label>状态筛选
+            <select id="state">
+              <option value="open" selected>open</option>
+              <option value="closed">closed</option>
+              <option value="all">all</option>
+            </select>
+          </label>
           <label>Issue 编号<input id="issue-number" type="number" min="1" value="1" /></label>
         </div>
         <div class="actions">
@@ -32,10 +39,15 @@
       </section>
 
       <section class="card">
-        <div class="result-heading"><h2>变更列表</h2><span class="pill">点击条目即读取上下文</span></div>
+        <div class="result-heading"><h2>变更列表</h2><span id="list-title" class="pill">尚未读取</span></div>
         <ul id="list" class="list">
           <li class="list-empty">点击“读取 Pull Request 列表”或“读取 Issue 列表”后在此选择。</li>
         </ul>
+        <div id="pager" class="pager" hidden>
+          <span id="pager-page" class="pager-page">第 1 页</span>
+          <button id="page-prev" class="secondary" type="button" disabled>上一页</button>
+          <button id="page-next" class="secondary" type="button" disabled>下一页</button>
+        </div>
       </section>
 
       <section class="card result-card">
