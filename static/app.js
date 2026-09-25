@@ -1,5 +1,6 @@
 const ownerInput = document.querySelector('#owner')
 const repoInput = document.querySelector('#repo')
+const issueNumberInput = document.querySelector('#issue-number')
 const statusText = document.querySelector('#status')
 const result = document.querySelector('#result')
 const tokenState = document.querySelector('#token-state')
@@ -41,6 +42,25 @@ document.querySelector('#repo-button').addEventListener('click', async () => {
     const payload = await requestJson(`/api/repository?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`)
     showResult(payload)
     setStatus(`读取成功：${payload.full_name}`, 'ok')
+  } catch (error) {
+    showResult({ error: error.message })
+    setStatus(error.message, 'error')
+  }
+})
+
+document.querySelector('#issue-button').addEventListener('click', async () => {
+  const owner = ownerInput.value.trim()
+  const repo = repoInput.value.trim()
+  const number = issueNumberInput.value.trim()
+  if (!number) {
+    setStatus('请填写 Issue 编号', 'error')
+    return
+  }
+  setStatus(`正在请求 Issue #${number} 上下文…`)
+  try {
+    const payload = await requestJson(`/api/issues/${encodeURIComponent(number)}/context?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`)
+    showResult(payload)
+    setStatus(`读取成功：Issue #${payload.issue.number} ${payload.issue.title}`, 'ok')
   } catch (error) {
     showResult({ error: error.message })
     setStatus(error.message, 'error')
