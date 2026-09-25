@@ -158,6 +158,70 @@ def _redact(value: str) -> str:
     return text
 
 
+def _github_request_with_headers(
+    method: str, path: str, *, params: dict[str, Any] | None = None
+) -> tuple[Any, str | None]:
+    """平行于 `_github_request` 的只读上游请求，额外返回 `Link` 头。
+
+    与 `_github_request` 的差异只有两点：
+
+    1. 额外返回响应头里的 `Link`，用于判断「还有下一页」；
+    2. **不读写缓存**。`Link` 属于响应头，缓存层目前只保存 body，
+       若复用缓存就会丢失分页信号，因此这里刻意绕过缓存。
+
+    其余约定与 `_github_request` 保持一致：同样的请求头、同样的超时与
+    错误透传（上游失败 → 相同状态码的 `HTTPException`），脱敏统一走 `_redact`。
+    """
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": os.getenv("GITHUB_API_VERSION", "2022-11-28"),
+    }
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    try:
+        with httpx.Client(timeout=20, headers=headers) as client:
+            response = client.request(method, f"{GITHUB_API_BASE_URL}{path}", params=params)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub API 网络请求失败: {exc.__class__.__name__}") from exc
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"GitHub API 请求失败: {_redact(response.text)}",
+        )
+    data = response.json() if response.content else {}
+    link_header = response.headers.get("Link")
+    return data, link_header
+
+
+def _parse_link_header(link: str | None) -> tuple[bool, int | None]:
+    """解析 GitHub 的 `Link` 响应头，返回 `(has_more, next_page)`。
+
+    只关心 `rel="next"` 这一个准确的分页信号：它由 GitHub 自己给出，
+    因此能区分「本页刚好装满但确实没有下一页」与「还有下一页」这两种场景，
+    这正是「靠条数猜」做不到的。
+
+    任何畸形输入都退化为 `(False, None)`，绝不抛异常：判断失误最多让调用方
+    看不到下一页提示，而不应该让接口直接 500。
+    """
+    if not link:
+        return False, None
+    for segment in str(link).split(","):
+        if 'rel="next"' not in segment:
+            continue
+        match = re.search(r"<([^>]*)>", segment)
+        if not match:
+            continue
+        page_match = re.search(r"[?&]page=(\d+)", match.group(1))
+        if not page_match:
+            # GitHub 的分页 next URL 应包含可解析的 page；畸形链接不应误报还有下一页。
+            continue
+        next_page = int(page_match.group(1))
+        if next_page < 1:
+            continue
+        return True, next_page
+    return False, None
+
+
 def _probe_github(path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
     """探测型上游请求：与 `_github_request` 平行，但**不外抛异常**、**不读写缓存**。
 
@@ -331,6 +395,32 @@ def _validate_per_page(per_page: int) -> int:
     return per_page
 
 
+def _validate_comments_paging(comments_page: int, comments_per_page: int) -> tuple[int, int]:
+    """评论翻页参数校验；默认值 1 / 100 与改动前的行为保持一致。"""
+    if comments_per_page < 1 or comments_per_page > MAX_PER_PAGE:
+        raise HTTPException(status_code=400, detail=f"comments_per_page 必须在 1 到 {MAX_PER_PAGE} 之间")
+    if comments_page < 1:
+        raise HTTPException(status_code=400, detail="comments_page 必须是正整数")
+    return comments_page, comments_per_page
+
+
+def _resolve_page(page: int | None, cursor: int | None) -> int | None:
+    """把 `page` / `cursor` 归一化为要透传给上游的页号。
+
+    `cursor` 就是上一页响应里的 `next_page`，因此两者语义等价、不能同时使用。
+    `page` 刻意不设自身上限，越界由 GitHub 判定，避免与上游规则重复维护。
+    """
+    if cursor is not None:
+        if page is not None:
+            raise HTTPException(status_code=400, detail="cursor 与 page 不能同时使用")
+        if cursor < 1:
+            raise HTTPException(status_code=400, detail="cursor 必须是正整数")
+        return cursor
+    if page is not None and page < 1:
+        raise HTTPException(status_code=400, detail="page 必须是正整数")
+    return page
+
+
 def _user_login(payload: Any) -> str | None:
     return (payload.get("user") or {}).get("login") if isinstance(payload, dict) else None
 
@@ -370,15 +460,34 @@ def list_pull_requests(
     repo: str = Query(...),
     state: str = Query("open"),
     per_page: int = Query(30),
+    page: int | None = Query(None),
+    cursor: int | None = Query(None),
 ) -> dict[str, Any]:
-    """按状态列出仓库 Pull Request，只返回白名单字段。"""
+    """按状态列出仓库 Pull Request，只返回白名单字段。
+
+    `has_more`/`next_page` 来自上游 `Link` 头，而不是「本页条数是否等于 per_page」，
+    因此「刚好装满但确实没有下一页」不会被误报为还有下一页。
+    """
     owner, repo = _validate_repository(owner, repo)
     state = _validate_state(state)
     per_page = _validate_per_page(per_page)
-    params = {"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"}
-    items = _github_request("GET", f"/repos/{owner}/{repo}/pulls", params=params)
+    resolved_page = _resolve_page(page, cursor)
+    params: dict[str, Any] = {"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"}
+    if resolved_page is not None:
+        # 只在显式翻页时才带上 page，避免给首屏请求平添参数。
+        params["page"] = resolved_page
+    items, link_header = _github_request_with_headers("GET", f"/repos/{owner}/{repo}/pulls", params=params)
     pulls = [_trim_pull_request(item) for item in (items or []) if isinstance(item, dict)]
-    return {"count": len(pulls), "state": state, "pull_requests": pulls}
+    has_more, next_page = _parse_link_header(link_header)
+    return {
+        "count": len(pulls),
+        "state": state,
+        "per_page": per_page,
+        "page": resolved_page if resolved_page is not None else 1,
+        "has_more": has_more,
+        "next_page": next_page,
+        "pull_requests": pulls,
+    }
 
 
 @app.get("/api/issues")
@@ -387,33 +496,67 @@ def list_issues(
     repo: str = Query(...),
     state: str = Query("open"),
     per_page: int = Query(30),
+    page: int | None = Query(None),
+    cursor: int | None = Query(None),
 ) -> dict[str, Any]:
-    """按状态列出仓库 Issue；GitHub 的 issues 接口会混入 PR，这里显式过滤。"""
+    """按状态列出仓库 Issue；GitHub 的 issues 接口会混入 PR，这里显式过滤。
+
+    注意 `count` 是**本页过滤后**的条数，而 `has_more` 以上游 `Link` 为准，
+    两者不同源：即使本页条数很少，也可能仍然存在下一页。
+    """
     owner, repo = _validate_repository(owner, repo)
     state = _validate_state(state)
     per_page = _validate_per_page(per_page)
-    params = {"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"}
-    items = _github_request("GET", f"/repos/{owner}/{repo}/issues", params=params)
+    resolved_page = _resolve_page(page, cursor)
+    params: dict[str, Any] = {"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"}
+    if resolved_page is not None:
+        params["page"] = resolved_page
+    items, link_header = _github_request_with_headers("GET", f"/repos/{owner}/{repo}/issues", params=params)
     issues = [
         _trim_issue(item)
         for item in (items or [])
         if isinstance(item, dict) and "pull_request" not in item
     ]
-    return {"count": len(issues), "state": state, "issues": issues}
+    has_more, next_page = _parse_link_header(link_header)
+    return {
+        "count": len(issues),
+        "state": state,
+        "per_page": per_page,
+        "page": resolved_page if resolved_page is not None else 1,
+        "has_more": has_more,
+        "next_page": next_page,
+        "issues": issues,
+    }
 
 
 @app.get("/api/pulls/{number}/context")
-def pull_request_context(number: int, owner: str = Query(...), repo: str = Query(...)) -> dict[str, Any]:
+def pull_request_context(
+    number: int,
+    owner: str = Query(...),
+    repo: str = Query(...),
+    comments_page: int = Query(1),
+    comments_per_page: int = Query(100),
+) -> dict[str, Any]:
     owner, repo = _validate_repository(owner, repo)
+    comments_page, comments_per_page = _validate_comments_paging(comments_page, comments_per_page)
     pull_request = _github_request("GET", f"/repos/{owner}/{repo}/pulls/{number}")
     head_sha = ((pull_request.get("head") or {}).get("sha") or "") if isinstance(pull_request, dict) else ""
-    comments = _github_request("GET", f"/repos/{owner}/{repo}/issues/{number}/comments", params={"per_page": 100})
+    comments, comments_link = _github_request_with_headers(
+        "GET",
+        f"/repos/{owner}/{repo}/issues/{number}/comments",
+        params={"page": comments_page, "per_page": comments_per_page},
+    )
     review_comments = _github_request("GET", f"/repos/{owner}/{repo}/pulls/{number}/comments", params={"per_page": 100})
     reviews = _github_request("GET", f"/repos/{owner}/{repo}/pulls/{number}/reviews", params={"per_page": 100})
     statuses = _github_request("GET", f"/repos/{owner}/{repo}/commits/{head_sha}/statuses", params={"per_page": 100}) if head_sha else []
     runs_data = _github_request("GET", f"/repos/{owner}/{repo}/actions/runs", params={"head_sha": head_sha, "per_page": 50}) if head_sha else {}
+    comments_has_more, comments_next_page = _parse_link_header(comments_link)
     return {
         "pull_request": pull_request,
+        "comments_page": comments_page,
+        "comments_per_page": comments_per_page,
+        "comments_has_more": comments_has_more,
+        "comments_next_page": comments_next_page,
         "comments": comments,
         "review_comments": review_comments,
         "reviews": reviews,
@@ -423,11 +566,27 @@ def pull_request_context(number: int, owner: str = Query(...), repo: str = Query
 
 
 @app.get("/api/issues/{number}/context")
-def issue_context(number: int, owner: str = Query(...), repo: str = Query(...)) -> dict[str, Any]:
+def issue_context(
+    number: int,
+    owner: str = Query(...),
+    repo: str = Query(...),
+    comments_page: int = Query(1),
+    comments_per_page: int = Query(100),
+) -> dict[str, Any]:
     owner, repo = _validate_repository(owner, repo)
+    comments_page, comments_per_page = _validate_comments_paging(comments_page, comments_per_page)
     issue = _github_request("GET", f"/repos/{owner}/{repo}/issues/{number}")
-    comments = _github_request("GET", f"/repos/{owner}/{repo}/issues/{number}/comments", params={"per_page": 100})
+    comments, comments_link = _github_request_with_headers(
+        "GET",
+        f"/repos/{owner}/{repo}/issues/{number}/comments",
+        params={"page": comments_page, "per_page": comments_per_page},
+    )
+    comments_has_more, comments_next_page = _parse_link_header(comments_link)
     return {
+        "comments_page": comments_page,
+        "comments_per_page": comments_per_page,
+        "comments_has_more": comments_has_more,
+        "comments_next_page": comments_next_page,
         "issue": {
             "number": issue.get("number"),
             "title": issue.get("title"),
