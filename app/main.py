@@ -89,6 +89,12 @@ def health() -> dict[str, Any]:
     }
 
 
+@app.get("/api/ready")
+def ready() -> dict[str, Any]:
+    """进程内就绪检查：不访问 GitHub，不读取 Token。"""
+    return {"ok": True, "status": "ready"}
+
+
 @app.get("/api/repository")
 def repository(owner: str = Query(...), repo: str = Query(...)) -> dict[str, Any]:
     owner, repo = _validate_repository(owner, repo)

@@ -18,6 +18,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ## 接口
 
 - `GET /api/health`：检查服务和 GitHub Token 配置状态。
+- `GET /api/ready`：就绪检查，服务可接收流量时返回 `{"ok": true, "status": "ready"}`；不访问 GitHub，不需要 `GITHUB_TOKEN`。
 - `GET /api/repository?owner=Guo-Yixin&repo=test-coding-repo`：读取 GitHub 仓库信息。
 - `GET /api/pulls/{number}/context`：读取 PR、普通评论、Review、Review Comment、Commit Status 和 Actions 状态。
 - `GET /api/issues/{number}/context?owner=Guo-Yixin&repo=test-coding-repo`：读取 Issue 上下文（标题、状态、作者、标签、创建时间）与评论列表，仅返回白名单字段。
@@ -27,6 +28,9 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ### 示例
 
 ```powershell
+# 就绪检查（无需 Token）
+curl "http://127.0.0.1:8000/api/ready"
+# -> {"ok": true, "status": "ready"}
 # 读取 Issue #1 的上下文
 curl "http://127.0.0.1:8000/api/issues/1/context?owner=Guo-Yixin&repo=test-coding-repo"
 # -> {"issue": {"number": 1, "title": "...", "state": "open", "user": "...", "labels": [], "comments": 0, "created_at": "..."},
