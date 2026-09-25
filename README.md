@@ -21,10 +21,10 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 - `GET /api/ready`：就绪检查，服务可接收流量时返回 `{"ok": true, "status": "ready"}`；不访问 GitHub，不需要 `GITHUB_TOKEN`。
 - `GET /api/diagnostics?owner=Guo-Yixin&repo=test-coding-repo`：上游自检。返回 `rate_limit`（GitHub 配额 limit/remaining/used 与 `reset_in_seconds`；该上游接口**不消耗配额**）、`cache`（缓存统计）与 `repository`（仅在同时传入 `owner` 和 `repo` 时探测仓库可达性，否则返回 `{"skip": true}`）。
 - `GET /api/repository?owner=Guo-Yixin&repo=test-coding-repo`：读取 GitHub 仓库信息。
-- `GET /api/pulls?owner=Guo-Yixin&repo=test-coding-repo&state=open`：列出 Pull Request（`state` 仅支持 `open`/`closed`/`all`，`per_page` 上限 100），仅返回白名单字段。
-- `GET /api/issues?owner=Guo-Yixin&repo=test-coding-repo&state=open`：列出 Issue，参数与裁剪规则同 `/api/pulls`；**带 `pull_request` 的条目会被过滤掉**，避免 PR 混入 Issue 列表。
-- `GET /api/pulls/{number}/context`：读取 PR、普通评论、Review、Review Comment、Commit Status 和 Actions 状态。
-- `GET /api/issues/{number}/context?owner=Guo-Yixin&repo=test-coding-repo`：读取 Issue 上下文（标题、状态、作者、标签、创建时间）与评论列表，仅返回白名单字段。
+- `GET /api/pulls?owner=Guo-Yixin&repo=test-coding-repo&state=open`：列出 Pull Request（`state` 仅支持 `open`/`closed`/`all`，`per_page` 上限 100），仅返回白名单字段。**支持翻页**：可选 `page`（页号）或 `cursor`（等于上一页返回的 `next_page`），两者互斥。响应含 `per_page`、`page`、`has_more`、`next_page`。
+- `GET /api/issues?owner=Guo-Yixin&repo=test-coding-repo&state=open`：列出 Issue，参数与裁剪规则同 `/api/pulls`（含翻页参数）；**带 `pull_request` 的条目会被过滤掉**，避免 PR 混入 Issue 列表。
+- `GET /api/pulls/{number}/context`：读取 PR、普通评论、Review、Review Comment、Commit Status 和 Actions 状态。评论支持 `comments_page` / `comments_per_page`，响应含 `comments_has_more`、`comments_next_page`。
+- `GET /api/issues/{number}/context?owner=Guo-Yixin&repo=test-coding-repo`：读取 Issue 上下文（标题、状态、作者、标签、创建时间）与评论列表，仅返回白名单字段。评论翻页参数同上。
 - `POST /api/issues`：创建普通 Issue。
 - `POST /api/pulls`：创建普通非 Draft PR，不执行 Merge。
 
@@ -43,10 +43,15 @@ curl "http://127.0.0.1:8000/api/diagnostics?owner=Guo-Yixin&repo=test-coding-rep
 #     "problems": []}
 # 列出待处理的 Pull Request
 curl "http://127.0.0.1:8000/api/pulls?owner=Guo-Yixin&repo=test-coding-repo&state=open"
-# -> {"count": 1, "state": "open", "pull_requests": [{"number": 3, "title": "...", "head": "feature", "base": "main", ...}]}
+# -> {"count": 1, "state": "open", "per_page": 30, "page": 1, "has_more": false, "next_page": null,
+#     "pull_requests": [{"number": 3, "title": "...", "head": "feature", "base": "main", ...}]}
+# 翻到第 2 页（也可以用 cursor=<上一页的 next_page>，两者不能同时传）
+curl "http://127.0.0.1:8000/api/pulls?owner=Guo-Yixin&repo=test-coding-repo&state=open&page=2"
+# -> {"count": 30, "state": "open", "per_page": 30, "page": 2, "has_more": true, "next_page": 3, "pull_requests": [...]}
 # 列出 Issue（自动过滤 PR）
 curl "http://127.0.0.1:8000/api/issues?owner=Guo-Yixin&repo=test-coding-repo&state=open"
-# -> {"count": 2, "state": "open", "issues": [{"number": 1, "title": "...", "labels": ["bug"], ...}]}
+# -> {"count": 2, "state": "open", "per_page": 30, "page": 1, "has_more": false, "next_page": null,
+#     "issues": [{"number": 1, "title": "...", "labels": ["bug"], ...}]}
 # 读取 Issue #1 的上下文
 curl "http://127.0.0.1:8000/api/issues/1/context?owner=Guo-Yixin&repo=test-coding-repo"
 # -> {"issue": {"number": 1, "title": "...", "state": "open", "user": "...", "labels": [], "comments": 0, "created_at": "..."},
@@ -56,10 +61,28 @@ curl "http://127.0.0.1:8000/api/issues/1/context?owner=Guo-Yixin&repo=test-codin
 说明：
 
 - 列表接口每次消耗 1 次配额、上下文接口消耗 2 次以上配额，但相同请求在缓存有效期内只会打到 GitHub 一次；未配置 `GITHUB_TOKEN` 时限额较低，可能返回 403。
-- 评论最多返回前 100 条，暂不支持分页。
-- `owner`/`repo` 格式不合法返回 400，`state` 不是 `open`/`closed`/`all` 返回 400，`per_page` 不在 1~100 之间返回 400。
+- **列表接口有意绕过缓存**：`has_more` 来自上游响应的 `Link` 头，而缓存层只保存响应体不保存响应头，因此两个列表接口不走缓存，每翻一页都真实消耗 1 次配额。
+- `has_more` 与 `count` **不同源**，不要互相推断：`has_more` 以上游 `Link` 头为准；`count` 是本页**过滤后**的条数（`/api/issues` 会剔除 PR），因此可能出现「本页只有几条但仍有下一页」，也可能出现「本页刚好 30 条但已到最后一页」。
+- 列表翻页可选 `page` 或 `cursor`（`cursor` 即上一页返回的 `next_page`），**两者互斥**，同时传返回 400；`page`/`cursor` 非正整数返回 400。
+- `owner`/`repo` 格式不合法返回 400，`state` 不是 `open`/`closed`/`all` 返回 400，`per_page` 不在 1~100 之间返回 400，`comments_per_page` 不在 1~100 之间返回 400。
+- 评论默认返回前 100 条，支持通过 `comments_page` / `comments_per_page` 翻页，并给出 `comments_has_more` / `comments_next_page`。
 - 前端「读取 Pull Request 列表」「读取 Issue 列表」按钮会调用上面两个列表接口，点击列表条目即可把编号回填到输入框，再点「读取 Issue」查看上下文，从而补齐「仓库 → 列表 → 编号 → 上下文」的闭环。
+- 前端列表支持翻页：PR 与 Issue **各自独立**维护页码与分页状态；「下一页」是否可用**只依据接口返回的 `has_more`**，绝不用「本页条数是否等于 `per_page`」推断。切换状态筛选或修改 Owner/Repository 会把页码重置为第 1 页并清空旧列表。
 - 前端「自检」按钮调用 `/api/diagnostics`，把配额剩余与仓库可达性渲染到「接口返回」卡片和右上角状态徽章。
+
+### 前端分页人工验收清单
+
+仓库没有前端测试框架（无 `package.json`、无 Node 依赖），前端分页以人工冒烟为准。启动服务后逐条核对：
+
+1. 第 1 页时「上一页」为禁用态（既有 `disabled` 属性，也有变灰样式）。
+2. 翻到有下一页的列表，「下一页」可用；到达最后一页后自动变为禁用。
+3. **关键防线**：选一个 PR/Issue 总数不足一页的仓库，此时「下一页」必须禁用——证明判定依据是 `has_more` 而不是条数。
+4. PR 列表翻到第 2 页 → 切到 Issue 列表 → 再切回 PR 列表，两者页码互不干扰。
+5. 快速连点「下一页」，不会发出重复请求，最终展示与最后一次点击一致。
+6. 修改 Owner 或 Repository 输入框，页码立刻归 1 且旧列表被清空。
+7. 把「状态筛选」切到 `closed`，页码归 1 并按 `state=closed` 重新请求。
+8. 填入不存在的仓库或断网，列表显示「读取失败。」且页面不白屏。
+9. 点击任一列表条目，「接口返回」卡片展示该条目且 Issue 编号被回填，再点「读取 Issue」能取回上下文。
 
 ## 自检接口的失败语义（与其它接口相反）
 
