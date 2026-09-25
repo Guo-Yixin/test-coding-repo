@@ -46,6 +46,15 @@ def test_health_endpoint() -> None:
     assert "github_token_configured" in response.json()
 
 
+def test_ready_endpoint() -> None:
+    response = client.get("/api/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "status": "ready"}
+    # 就绪检查只表示“应用可服务”，不承载凭据信息。
+    assert "github_token_configured" not in response.json()
+
+
 def test_repository_validation_rejects_invalid_owner() -> None:
     response = client.get("/api/repository", params={"owner": "../bad", "repo": "repo"})
 
