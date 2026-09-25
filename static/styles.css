@@ -16,7 +16,7 @@ h2 { margin: 0; font-size: 18px; }
 label { display: grid; gap: 8px; color: #aeb9d2; font-size: 13px; }
 input { width: 100%; padding: 13px 14px; color: #f8faff; border: 1px solid #3b496b; border-radius: 10px; background: #0e1422; outline: none; }
 input:focus { border-color: #86a2ff; }
-.actions { display: flex; gap: 12px; margin-top: 20px; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }
 button { padding: 12px 16px; border: 0; border-radius: 10px; color: #101522; background: #9eb5ff; font-weight: 700; cursor: pointer; }
 button.secondary { color: #d9e1f7; background: #2b3855; }
 .status { min-height: 24px; margin: 18px 0 0; color: #aeb9d2; }
@@ -27,4 +27,8 @@ button.secondary { color: #d9e1f7; background: #2b3855; }
 .pill.ok { color: #79e2b0; background: #173e36; }
 .pill.warn { color: #ffd27e; background: #4d3d1c; }
 pre { min-height: 180px; margin: 18px 0 0; padding: 18px; overflow: auto; color: #d7e0f5; border-radius: 12px; background: #0d1320; line-height: 1.6; }
+.list { display: grid; gap: 8px; margin: 18px 0 0; padding: 0; list-style: none; }
+.list-empty { color: #8592ad; font-size: 13px; }
+button.list-item { width: 100%; padding: 11px 14px; color: #d9e1f7; background: #222c44; font-weight: 600; text-align: left; }
+button.list-item:hover { background: #2b3855; }
 @media (max-width: 620px) { .shell { padding: 32px 0; } .field-row { grid-template-columns: 1fr; } .actions { flex-direction: column; } }

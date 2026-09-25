@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,29 @@ STATIC_DIR = ROOT / "static"
 GITHUB_API_BASE_URL = os.getenv("GITHUB_API_BASE_URL", "https://api.github.com").rstrip("/")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 REPOSITORY_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
+ALLOWED_STATES = ("open", "closed", "all")
+MAX_PER_PAGE = 100
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.getenv(name, "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= minimum else default
+
+
+# 进程内只读缓存：TTL=0 表示关闭缓存；条目上限按 LRU 淘汰，避免长期运行内存无界增长。
+CACHE_TTL_SECONDS = _env_int("GITHUB_CACHE_TTL_SECONDS", 45)
+CACHE_MAX_ENTRIES = _env_int("GITHUB_CACHE_MAX_ENTRIES", 128, minimum=1)
+# 仅这些只读前缀参与缓存；POST 等写操作永不缓存。
+CACHEABLE_PATH_PREFIXES = (
+    "/repos/",
+    "/rate_limit",
+)
+_cache: "OrderedDict[str, tuple[float, Any]]" = OrderedDict()
+_cache_stats = {"hits": 0, "misses": 0, "entries": 0, "evictions": 0, "stores": 0}
 
 
 class IssueRequest(BaseModel):
@@ -56,7 +81,54 @@ def _validate_repository(owner: str, repo: str) -> tuple[str, str]:
     return owner, repo
 
 
+def _cache_key(method: str, path: str, params: dict[str, Any] | None) -> str:
+    normalized = "&".join(f"{key}={params[key]}" for key in sorted(params or {}))
+    return f"{method} {path}?{normalized}"
+
+
+def _is_cacheable(method: str, path: str) -> bool:
+    """只有 GET 且命中白名单前缀的请求才允许进入缓存，写操作永不缓存。"""
+    return method.upper() == "GET" and CACHE_TTL_SECONDS > 0 and path.startswith(CACHEABLE_PATH_PREFIXES)
+
+
+def _cache_lookup(key: str) -> tuple[bool, Any]:
+    entry = _cache.get(key)
+    if entry is None:
+        _cache_stats["misses"] += 1
+        return False, None
+    created_at, value = entry
+    if time.monotonic() - created_at >= CACHE_TTL_SECONDS:
+        _cache.pop(key, None)
+        _cache_stats["misses"] += 1
+        _cache_stats["entries"] = len(_cache)
+        return False, None
+    _cache.move_to_end(key)
+    _cache_stats["hits"] += 1
+    return True, value
+
+
+def _cache_store(key: str, value: Any) -> None:
+    _cache[key] = (time.monotonic(), value)
+    _cache.move_to_end(key)
+    _cache_stats["stores"] += 1
+    while len(_cache) > CACHE_MAX_ENTRIES:
+        _cache.popitem(last=False)
+        _cache_stats["evictions"] += 1
+    _cache_stats["entries"] = len(_cache)
+
+
+def _cache_clear() -> None:
+    _cache.clear()
+    _cache_stats["entries"] = 0
+
+
 def _github_request(method: str, path: str, *, params: dict[str, Any] | None = None, json: dict[str, Any] | None = None) -> Any:
+    cacheable = _is_cacheable(method, path)
+    cache_key = _cache_key(method, path, params) if cacheable else ""
+    if cacheable:
+        hit, cached_value = _cache_lookup(cache_key)
+        if hit:
+            return cached_value
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": os.getenv("GITHUB_API_VERSION", "2022-11-28"),
@@ -71,7 +143,11 @@ def _github_request(method: str, path: str, *, params: dict[str, Any] | None = N
     if response.status_code >= 400:
         detail = response.text[:500].replace(GITHUB_TOKEN, "***") if GITHUB_TOKEN else response.text[:500]
         raise HTTPException(status_code=response.status_code, detail=f"GitHub API 请求失败: {detail}")
-    return response.json() if response.content else {}
+    data = response.json() if response.content else {}
+    if cacheable:
+        # 仅缓存成功结果；失败已在上面透传，不会被冻结。
+        _cache_store(cache_key, data)
+    return data
 
 
 @app.get("/", include_in_schema=False)
@@ -86,6 +162,16 @@ def health() -> dict[str, Any]:
         "service": "test-coding-repo",
         "github_token_configured": bool(GITHUB_TOKEN),
         "github_api_base_url": GITHUB_API_BASE_URL,
+        "cache": {
+            "ttl_seconds": CACHE_TTL_SECONDS,
+            "max_entries": CACHE_MAX_ENTRIES,
+            "enabled": CACHE_TTL_SECONDS > 0,
+            "hits": _cache_stats["hits"],
+            "misses": _cache_stats["misses"],
+            "entries": _cache_stats["entries"],
+            "evictions": _cache_stats["evictions"],
+            "stores": _cache_stats["stores"],
+        },
     }
 
 
@@ -110,6 +196,90 @@ def repository(owner: str = Query(...), repo: str = Query(...)) -> dict[str, Any
         "html_url": data.get("html_url"),
         "open_issues_count": data.get("open_issues_count"),
     }
+
+
+def _validate_state(state: str) -> str:
+    state = state.strip().lower()
+    if state not in ALLOWED_STATES:
+        raise HTTPException(status_code=400, detail=f"state 只能是 {'/'.join(ALLOWED_STATES)}")
+    return state
+
+
+def _validate_per_page(per_page: int) -> int:
+    if per_page < 1 or per_page > MAX_PER_PAGE:
+        raise HTTPException(status_code=400, detail=f"per_page 必须在 1 到 {MAX_PER_PAGE} 之间")
+    return per_page
+
+
+def _user_login(payload: Any) -> str | None:
+    return (payload.get("user") or {}).get("login") if isinstance(payload, dict) else None
+
+
+def _trim_pull_request(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "number": item.get("number"),
+        "title": item.get("title"),
+        "state": item.get("state"),
+        "draft": bool(item.get("draft")),
+        "user": _user_login(item),
+        "head": (item.get("head") or {}).get("ref"),
+        "base": (item.get("base") or {}).get("ref"),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "html_url": item.get("html_url"),
+    }
+
+
+def _trim_issue(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "number": item.get("number"),
+        "title": item.get("title"),
+        "state": item.get("state"),
+        "user": _user_login(item),
+        "labels": [label.get("name") for label in (item.get("labels") or []) if isinstance(label, dict)],
+        "comments": item.get("comments"),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "html_url": item.get("html_url"),
+    }
+
+
+@app.get("/api/pulls")
+def list_pull_requests(
+    owner: str = Query(...),
+    repo: str = Query(...),
+    state: str = Query("open"),
+    per_page: int = Query(30),
+) -> dict[str, Any]:
+    """按状态列出仓库 Pull Request，只返回白名单字段。"""
+    owner, repo = _validate_repository(owner, repo)
+    state = _validate_state(state)
+    per_page = _validate_per_page(per_page)
+    params = {"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"}
+    items = _github_request("GET", f"/repos/{owner}/{repo}/pulls", params=params)
+    pulls = [_trim_pull_request(item) for item in (items or []) if isinstance(item, dict)]
+    return {"count": len(pulls), "state": state, "pull_requests": pulls}
+
+
+@app.get("/api/issues")
+def list_issues(
+    owner: str = Query(...),
+    repo: str = Query(...),
+    state: str = Query("open"),
+    per_page: int = Query(30),
+) -> dict[str, Any]:
+    """按状态列出仓库 Issue；GitHub 的 issues 接口会混入 PR，这里显式过滤。"""
+    owner, repo = _validate_repository(owner, repo)
+    state = _validate_state(state)
+    per_page = _validate_per_page(per_page)
+    params = {"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"}
+    items = _github_request("GET", f"/repos/{owner}/{repo}/issues", params=params)
+    issues = [
+        _trim_issue(item)
+        for item in (items or [])
+        if isinstance(item, dict) and "pull_request" not in item
+    ]
+    return {"count": len(issues), "state": state, "issues": issues}
 
 
 @app.get("/api/pulls/{number}/context")
