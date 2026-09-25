@@ -126,6 +126,36 @@ def pull_request_context(number: int, owner: str = Query(...), repo: str = Query
     }
 
 
+@app.get("/api/issues/{number}/context")
+def issue_context(number: int, owner: str = Query(...), repo: str = Query(...)) -> dict[str, Any]:
+    owner, repo = _validate_repository(owner, repo)
+    issue = _github_request("GET", f"/repos/{owner}/{repo}/issues/{number}")
+    comments = _github_request("GET", f"/repos/{owner}/{repo}/issues/{number}/comments", params={"per_page": 100})
+    return {
+        "issue": {
+            "number": issue.get("number"),
+            "title": issue.get("title"),
+            "state": issue.get("state"),
+            "html_url": issue.get("html_url"),
+            "user": (issue.get("user") or {}).get("login"),
+            "labels": [label.get("name") for label in (issue.get("labels") or []) if isinstance(label, dict)],
+            "comments": issue.get("comments"),
+            "created_at": issue.get("created_at"),
+        },
+        "comments": [
+            {
+                "id": comment.get("id"),
+                "user": (comment.get("user") or {}).get("login"),
+                "body": comment.get("body"),
+                "created_at": comment.get("created_at"),
+                "html_url": comment.get("html_url"),
+            }
+            for comment in (comments or [])
+            if isinstance(comment, dict)
+        ],
+    }
+
+
 @app.post("/api/issues")
 def create_issue(payload: IssueRequest) -> dict[str, Any]:
     owner, repo = _validate_repository(payload.owner, payload.repo)

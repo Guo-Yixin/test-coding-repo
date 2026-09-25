@@ -20,11 +20,29 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 - `GET /api/health`：检查服务和 GitHub Token 配置状态。
 - `GET /api/repository?owner=Guo-Yixin&repo=test-coding-repo`：读取 GitHub 仓库信息。
 - `GET /api/pulls/{number}/context`：读取 PR、普通评论、Review、Review Comment、Commit Status 和 Actions 状态。
+- `GET /api/issues/{number}/context?owner=Guo-Yixin&repo=test-coding-repo`：读取 Issue 上下文（标题、状态、作者、标签、创建时间）与评论列表，仅返回白名单字段。
 - `POST /api/issues`：创建普通 Issue。
 - `POST /api/pulls`：创建普通非 Draft PR，不执行 Merge。
+
+### 示例
+
+```powershell
+# 读取 Issue #1 的上下文
+curl "http://127.0.0.1:8000/api/issues/1/context?owner=Guo-Yixin&repo=test-coding-repo"
+# -> {"issue": {"number": 1, "title": "...", "state": "open", "user": "...", "labels": [], "comments": 0, "created_at": "..."},
+#     "comments": [{"id": 1, "user": "...", "body": "...", "created_at": "...", "html_url": "..."}]}
+```
+
+说明：
+
+- 每次调用会消耗 2 次 GitHub API 配额；未配置 `GITHUB_TOKEN` 时限额较低，可能返回 403。
+- 评论最多返回前 100 条，暂不支持分页。
 
 ## 测试
 
 ```powershell
+pip install -r requirements.txt
 pytest -q
 ```
+
+测试通过测试替身拦截 GitHub 调用，不会发出真实网络请求。

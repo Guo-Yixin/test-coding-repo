@@ -18,10 +18,12 @@
         <div class="field-row">
           <label>Owner<input id="owner" value="Guo-Yixin" /></label>
           <label>Repository<input id="repo" value="test-coding-repo" /></label>
+          <label>Issue 编号<input id="issue-number" type="number" min="1" value="1" /></label>
         </div>
         <div class="actions">
           <button id="health-button" class="secondary">检查服务</button>
           <button id="repo-button">读取 GitHub 仓库</button>
+          <button id="issue-button" class="secondary">读取 Issue</button>
         </div>
         <p id="status" class="status" aria-live="polite">等待操作</p>
       </section>
