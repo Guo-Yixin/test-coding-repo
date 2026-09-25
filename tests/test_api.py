@@ -398,3 +398,131 @@ def test_cache_evicts_least_recently_used(monkeypatch: pytest.MonkeyPatch, _rese
     assert len(main._cache) == 2
     assert main._cache_stats["evictions"] == 1
     assert "GET a" not in main._cache
+
+
+# --- /api/diagnostics -------------------------------------------------------
+
+
+def _wire_probe_http(monkeypatch: pytest.MonkeyPatch, *, status_code: int = 200, raise_exc: Exception | None = None) -> dict[str, list[Any]]:
+    """自检专用替身：可模拟成功、上游报错与网络异常三种形态。"""
+    upstream: dict[str, list[Any]] = {"calls": []}
+
+    class _FakeResponse:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+        status_code = 200
+        content = b"1"
+        text = '{"message": "forbidden"}'
+
+        def json(self) -> Any:
+            if self.url.endswith("/rate_limit"):
+                return {"core": {"limit": 5000, "remaining": 4999, "used": 1, "reset": 1790000000}}
+            return {"full_name": "Guo-Yixin/test-coding-repo", "default_branch": "main", "private": False, "html_url": "https://github.com/Guo-Yixin/test-coding-repo"}
+
+    class _FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> "_FakeClient":
+            return self
+
+        def __exit__(self, *args: Any) -> bool:
+            return False
+
+        def request(self, method: str, url: str, params: Any = None, json: Any = None) -> Any:
+            upstream["calls"].append((method, url))
+            if raise_exc is not None:
+                raise raise_exc
+            response = _FakeResponse(url)
+            response.status_code = status_code
+            return response
+
+    monkeypatch.setattr(main.httpx, "Client", _FakeClient)
+    return upstream
+
+
+def test_diagnostics_reports_rate_limit(monkeypatch: pytest.MonkeyPatch, _reset_cache: Any) -> None:
+    upstream = _wire_probe_http(monkeypatch)
+
+    response = client.get("/api/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["rate_limit"]["ok"] is True
+    assert payload["rate_limit"]["remaining"] == 4999
+    assert payload["rate_limit"]["limit"] == 5000
+    assert payload["rate_limit"]["reset_in_seconds"] == 0
+    # 未传 owner/repo 时跳过仓库探测，且不额外请求上游。
+    assert payload["repository"]["skip"] is True
+    assert payload["problems"] == []
+    assert [url for _method, url in upstream["calls"]] == ["https://api.github.com/rate_limit"]
+
+
+def test_diagnostics_probes_repository_when_owner_given(monkeypatch: pytest.MonkeyPatch, _reset_cache: Any) -> None:
+    upstream = _wire_probe_http(monkeypatch)
+
+    response = client.get("/api/diagnostics", params={"owner": "Guo-Yixin", "repo": "test-coding-repo"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["repository"]["ok"] is True
+    assert payload["repository"].get("full_name") == "Guo-Yixin/test-coding-repo"
+    assert payload["problems"] == []
+    assert len(upstream["calls"]) == 2
+
+
+def test_diagnostics_keeps_http_200_when_upstream_fails(monkeypatch: pytest.MonkeyPatch, _reset_cache: Any) -> None:
+    """本接口语义是“报告状态”：上游 403 时外层仍是 200，失败写进子项。"""
+    _wire_probe_http(monkeypatch, status_code=403)
+
+    response = client.get("/api/diagnostics", params={"owner": "Guo-Yixin", "repo": "test-coding-repo"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rate_limit"]["ok"] is False
+    assert payload["rate_limit"]["status"] == 403
+    assert payload["repository"]["ok"] is False
+    assert payload["repository"]["status"] == 403
+    # 与其它接口的“上游失败透传状态码”形成对照，因此这里必须仍是 200。
+    assert payload["problems"] == ["rate_limit", "repository"]
+
+
+def test_diagnostics_network_error_is_reported_not_raised(monkeypatch: pytest.MonkeyPatch, _reset_cache: Any) -> None:
+    _wire_probe_http(monkeypatch, raise_exc=main.httpx.TimeoutException("timeout"))
+
+    response = client.get("/api/diagnostics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["rate_limit"]["ok"] is False
+    # 网络异常（不是 HTTP 错误响应）时没有上游状态码，返回 status=None。
+    assert payload["rate_limit"]["status"] is None
+    assert "rate_limit" in payload["problems"]
+
+
+def test_diagnostics_never_caches_and_hides_token(monkeypatch: pytest.MonkeyPatch, _reset_cache: Any) -> None:
+    upstream = _wire_probe_http(monkeypatch)
+    monkeypatch.setattr(main, "GITHUB_TOKEN", "ghp_secret_should_never_leak")
+
+    first = client.get("/api/diagnostics")
+    second = client.get("/api/diagnostics")
+
+    assert first.status_code == second.status_code == 200
+    # 自检本身就是探测意图，不写入也不读取缓存，两次都真实打到上游。
+    assert main._cache_stats["entries"] == 0
+    assert len(upstream["calls"]) == 2
+    assert "ghp_secret_should_never_leak" not in first.text
+    assert first.json()["rate_limit"]["credential"] == "token"
+
+
+def test_diagnostics_accepts_partial_owner_without_probe(monkeypatch: pytest.MonkeyPatch, _reset_cache: Any) -> None:
+    """只给 owner 不给 repo 时不应探测，也不应报错。"""
+    upstream = _wire_probe_http(monkeypatch)
+
+    response = client.get("/api/diagnostics", params={"owner": "Guo-Yixin"})
+
+    assert response.status_code == 200
+    assert response.json()["repository"]["skip"] is True
+    assert len(upstream["calls"]) == 1

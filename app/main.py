@@ -150,6 +150,99 @@ def _github_request(method: str, path: str, *, params: dict[str, Any] | None = N
     return data
 
 
+def _redact(value: str) -> str:
+    """从任意文本中抹掉 Token，避免诊断信息意外回显凭据。"""
+    text = str(value)[:500]
+    if GITHUB_TOKEN:
+        text = text.replace(GITHUB_TOKEN, "***")
+    return text
+
+
+def _probe_github(path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """探测型上游请求：与 `_github_request` 平行，但**不外抛异常**、**不读写缓存**。
+
+    `/api/diagnostics` 的语义是「报告状态」而不是「执行操作」，因此失败也必须
+    以响应体子项的形式返回，外层 HTTP 保持 200。
+    """
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": os.getenv("GITHUB_API_VERSION", "2022-11-28"),
+    }
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    try:
+        with httpx.Client(timeout=20, headers=headers) as client:
+            response = client.request("GET", f"{GITHUB_API_BASE_URL}{path}", params=params)
+    except httpx.HTTPError as exc:
+        return {"ok": False, "status": None, "detail": f"网络请求失败: {exc.__class__.__name__}"}
+    if response.status_code >= 400:
+        return {
+            "ok": False,
+            "status": response.status_code,
+            "detail": f"GitHub API 请求失败: {_redact(response.text)}",
+        }
+    try:
+        data = response.json() if response.content else {}
+    except ValueError:
+        return {"ok": False, "status": response.status_code, "detail": "GitHub API 返回了非 JSON 内容"}
+    return {"ok": True, "status": response.status_code, "data": data}
+
+
+def _rate_limit_summary() -> dict[str, Any]:
+    """读取 `/rate_limit`（该接口不消耗配额），并换算重置时间。"""
+    probe = _probe_github("/rate_limit")
+    if not probe["ok"]:
+        return {"ok": False, "status": probe["status"], "detail": probe["detail"]}
+    core = (probe["data"] or {}).get("core") or {}
+    reset_at = core.get("reset")
+    remaining_seconds: int | None = None
+    reset_utc: str | None = None
+    if isinstance(reset_at, (int, float)):
+        remaining_seconds = max(0, int(reset_at - time.time()))
+        reset_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(reset_at))
+    return {
+        "ok": True,
+        "status": probe["status"],
+        "limit": core.get("limit"),
+        "remaining": core.get("remaining"),
+        "used": core.get("used"),
+        "reset_utc": reset_utc,
+        "reset_in_seconds": remaining_seconds,
+        # 未认证时额度按来源 IP 计，与 Token 额度不同源，这里显式区分。
+        "credential": "token" if GITHUB_TOKEN else "anonymous",
+        "token_configured": bool(GITHUB_TOKEN),
+    }
+
+
+def _repository_probe(owner: str, repo: str) -> dict[str, Any]:
+    owner, repo = _validate_repository(owner, repo)
+    probe = _probe_github(f"/repos/{owner}/{repo}")
+    if not probe["ok"]:
+        return {"ok": False, "status": probe["status"], "detail": probe["detail"], "full_name": f"{owner}/{repo}"}
+    data = probe["data"] or {}
+    return {
+        "ok": True,
+        "status": probe["status"],
+        "full_name": data.get("full_name"),
+        "default_branch": data.get("default_branch"),
+        "private": data.get("private"),
+        "html_url": data.get("html_url"),
+    }
+
+
+def _cache_snapshot() -> dict[str, Any]:
+    return {
+        "ttl_seconds": CACHE_TTL_SECONDS,
+        "enabled": CACHE_TTL_SECONDS > 0,
+        "max_entries": CACHE_MAX_ENTRIES,
+        "hits": _cache_stats["hits"],
+        "misses": _cache_stats["misses"],
+        "entries": _cache_stats["entries"],
+        "evictions": _cache_stats["evictions"],
+        "stores": _cache_stats["stores"],
+    }
+
+
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -179,6 +272,33 @@ def health() -> dict[str, Any]:
 def ready() -> dict[str, Any]:
     """进程内就绪检查：不访问 GitHub，不读取 Token。"""
     return {"ok": True, "status": "ready"}
+
+
+@app.get("/api/diagnostics")
+def diagnostics(owner: str | None = None, repo: str | None = None) -> dict[str, Any]:
+    """上游连通性与配额自检。
+
+    与其它接口不同：本接口是「报告状态」而非「执行操作」，因此**无论子项成功与否，
+    外层 HTTP 都返回 200**，失败信息放在对应子项的 `ok`/`status`/`detail` 里。
+    """
+    result: dict[str, Any] = {
+        "ok": True,
+        "github_api_base_url": GITHUB_API_BASE_URL,
+        "token_configured": bool(GITHUB_TOKEN),
+        "rate_limit": _rate_limit_summary(),
+        "cache": _cache_snapshot(),
+    }
+    if owner and repo:
+        result["repository"] = _repository_probe(owner, repo)
+    else:
+        result["repository"] = {"skip": True, "reason": "未提供 owner/repo，跳过仓库可达性探测"}
+    # 顶层 ok 只反映「自检是否跑完」，具体失败看各子项的 ok。
+    result["problems"] = [
+        name
+        for name in ("rate_limit", "repository")
+        if result.get(name) and result[name].get("ok") is False
+    ]
+    return result
 
 
 @app.get("/api/repository")

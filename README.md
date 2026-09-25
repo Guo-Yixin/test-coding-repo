@@ -19,6 +19,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 - `GET /api/health`：检查服务和 GitHub Token 配置状态；额外返回只读缓存的配置与命中统计（`cache` 字段）。
 - `GET /api/ready`：就绪检查，服务可接收流量时返回 `{"ok": true, "status": "ready"}`；不访问 GitHub，不需要 `GITHUB_TOKEN`。
+- `GET /api/diagnostics?owner=Guo-Yixin&repo=test-coding-repo`：上游自检。返回 `rate_limit`（GitHub 配额 limit/remaining/used 与 `reset_in_seconds`；该上游接口**不消耗配额**）、`cache`（缓存统计）与 `repository`（仅在同时传入 `owner` 和 `repo` 时探测仓库可达性，否则返回 `{"skip": true}`）。
 - `GET /api/repository?owner=Guo-Yixin&repo=test-coding-repo`：读取 GitHub 仓库信息。
 - `GET /api/pulls?owner=Guo-Yixin&repo=test-coding-repo&state=open`：列出 Pull Request（`state` 仅支持 `open`/`closed`/`all`，`per_page` 上限 100），仅返回白名单字段。
 - `GET /api/issues?owner=Guo-Yixin&repo=test-coding-repo&state=open`：列出 Issue，参数与裁剪规则同 `/api/pulls`；**带 `pull_request` 的条目会被过滤掉**，避免 PR 混入 Issue 列表。
@@ -33,6 +34,13 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 # 就绪检查（无需 Token）
 curl "http://127.0.0.1:8000/api/ready"
 # -> {"ok": true, "status": "ready"}
+# 上游自检：配额 + 仓库可达性（不含 owner/repo 时只查配额）
+curl "http://127.0.0.1:8000/api/diagnostics?owner=Guo-Yixin&repo=test-coding-repo"
+# -> {"ok": true, "token_configured": true,
+#     "rate_limit": {"ok": true, "status": 200, "limit": 5000, "remaining": 4999, "reset_in_seconds": 1234, "credential": "token"},
+#     "cache": {"ttl_seconds": 45, "enabled": true, ...},
+#     "repository": {"ok": true, "status": 200, "full_name": "Guo-Yixin/test-coding-repo"},
+#     "problems": []}
 # 列出待处理的 Pull Request
 curl "http://127.0.0.1:8000/api/pulls?owner=Guo-Yixin&repo=test-coding-repo&state=open"
 # -> {"count": 1, "state": "open", "pull_requests": [{"number": 3, "title": "...", "head": "feature", "base": "main", ...}]}
@@ -51,6 +59,25 @@ curl "http://127.0.0.1:8000/api/issues/1/context?owner=Guo-Yixin&repo=test-codin
 - 评论最多返回前 100 条，暂不支持分页。
 - `owner`/`repo` 格式不合法返回 400，`state` 不是 `open`/`closed`/`all` 返回 400，`per_page` 不在 1~100 之间返回 400。
 - 前端「读取 Pull Request 列表」「读取 Issue 列表」按钮会调用上面两个列表接口，点击列表条目即可把编号回填到输入框，再点「读取 Issue」查看上下文，从而补齐「仓库 → 列表 → 编号 → 上下文」的闭环。
+- 前端「自检」按钮调用 `/api/diagnostics`，把配额剩余与仓库可达性渲染到「接口返回」卡片和右上角状态徽章。
+
+## 自检接口的失败语义（与其它接口相反）
+
+其余接口遵循「上游失败就透传上游状态码」的约定（例如上游 403 就返回 403）。`/api/diagnostics` 是**报告型接口**，语义刻意相反：
+
+- **任何子项失败，外层 HTTP 仍然返回 200**，失败信息通过对应子项的 `ok: false`、`status` 与 `detail` 表达，例如 Token 无效或额度耗尽时：
+  `{"rate_limit": {"ok": false, "status": 403, "detail": "GitHub API 请求失败: ..."}, "problems": ["rate_limit", "repository"]}`
+- 判断自检是否通过，**必须看 `problems` 数组或各子项的 `ok`**，不能只看 HTTP 状态码。
+- 网络异常（如超时）时没有上游状态码，子项 `status` 为 `null`，`detail` 中是脱敏后的异常类名。
+- 子项之间互不影响：即使配额读取失败，仓库探测仍会照常执行并各自返回结果。
+- **绝不返回 Token 本身**，只提供 `token_configured` 布尔值和表示凭据来源的 `credential` 字段。
+
+### Token 状态区分
+
+未配置 `GITHUB_TOKEN` 与 Token 无效都会表现为配额受限，二者可通过以下方式区分：
+
+- `token_configured: false`：未配置 Token，配额按未认证（按 IP）计算。
+- `token_configured: true` 但 `rate_limit.ok: false` / `status: 403`：Token 已配置但无效或已耗尽。
 
 ## 只读缓存
 

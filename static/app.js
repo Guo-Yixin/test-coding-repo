@@ -48,6 +48,41 @@ function selectEntry(kind, entry) {
   setStatus(`已选择 #${entry.number}，可点击“读取 ${kind === 'pulls' ? 'Pull Request' : 'Issue'} 上下文”继续`, 'ok')
 }
 
+function setPill(text, kind = '') {
+  tokenState.textContent = text
+  tokenState.className = `pill ${kind}`
+}
+
+function summarizeDiagnostics(payload) {
+  const rate = payload.rate_limit || {}
+  const repository = payload.repository || {}
+  if (rate.ok === false) {
+    setPill(`配额读取失败：${rate.status || '网络错误'}`, 'warn')
+    return `自检发现问题：${(payload.problems || []).join('、')}`
+  }
+  setPill(`配额剩余 ${rate.remaining}/${rate.limit}`, rate.remaining > 0 ? 'ok' : 'warn')
+  if (repository.skip) return `自检完成：配额剩余 ${rate.remaining}，未做仓库探测`
+  if (repository.ok === false) return `自检发现问题：仓库 ${repository.full_name} 不可达（${repository.status || '网络错误'}）`
+  return `自检通过：仓库 ${repository.full_name} 可达，配额剩余 ${rate.remaining}`
+}
+
+document.querySelector('#diagnostics-button').addEventListener('click', async () => {
+  const owner = ownerInput.value.trim()
+  const repo = repoInput.value.trim()
+  setStatus('正在执行上游自检…')
+  try {
+    const query = owner && repo ? `?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}` : ''
+    const payload = await requestJson(`/api/diagnostics${query}`)
+    // 自检接口失败也返回 200，因此要靠 problems 判断，而不是靠 HTTP 状态码。
+    setStatus(summarizeDiagnostics(payload), (payload.problems || []).length ? 'error' : 'ok')
+    showResult(payload)
+  } catch (error) {
+    setPill('自检失败', 'warn')
+    showResult({ error: error.message })
+    setStatus(error.message, 'error')
+  }
+})
+
 async function requestJson(url, options) {
   const response = await fetch(url, options)
   const payload = await response.json().catch(() => ({ detail: response.statusText }))
