@@ -32,6 +32,11 @@ button:disabled { color: #6f7c99; background: #212a3d; cursor: not-allowed; }
 pre { min-height: 180px; margin: 18px 0 0; padding: 18px; overflow: auto; color: #d7e0f5; border-radius: 12px; background: #0d1320; line-height: 1.6; }
 .list { display: grid; gap: 8px; margin: 18px 0 0; padding: 0; list-style: none; }
 .list-empty { color: #8592ad; font-size: 13px; }
+.list-search { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 18px; }
+.list-search label { flex: 0 0 auto; color: #aeb9d2; font-size: 13px; }
+.list-search input { flex: 1 1 260px; width: auto; }
+#list-search:disabled { color: #6f7c99; border-color: #2a3550; background: #131a29; cursor: not-allowed; }
+.list-note { margin: 10px 0 0; color: #8592ad; font-size: 13px; line-height: 1.6; }
 button.list-item { width: 100%; padding: 11px 14px; color: #d9e1f7; background: #222c44; font-weight: 600; text-align: left; }
 button.list-item:hover { background: #2b3855; }
 .pager { display: flex; align-items: center; gap: 12px; margin-top: 18px; }

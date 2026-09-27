@@ -40,6 +40,18 @@
 
       <section class="card">
         <div class="result-heading"><h2>变更列表</h2><span id="list-title" class="pill">尚未读取</span></div>
+        <div class="list-search">
+          <label for="list-search">搜索已加载条目</label>
+          <input
+            id="list-search"
+            type="search"
+            placeholder="按标题或 #编号过滤，例如 pagination 或 3"
+            autocomplete="off"
+            aria-describedby="list-note"
+            disabled
+          />
+        </div>
+        <p id="list-note" class="list-note">先读取列表，再按标题或 #编号过滤当前已加载的一页；不会请求 GitHub，也不跨页搜索。</p>
         <ul id="list" class="list">
           <li class="list-empty">点击“读取 Pull Request 列表”或“读取 Issue 列表”后在此选择。</li>
         </ul>
